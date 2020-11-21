@@ -46,17 +46,17 @@ object Main extends App with LazyLogging {
   val sum: Flow[DependencyCount, DependencyCount, NotUsed] =
     Flow[DependencyCount]
       .fold(DependencyCount(None))(_ add _)
-      .filter(_.library.isDefined)
 
-  val counter: Flow[Row, DependencyCount, NotUsed] =
+  val counter: Flow[Row, (DependencyCount, DependencyCount), NotUsed] =
     Flow.fromGraph(GraphDSL.create() { implicit builder =>
       val dispatchRow = builder.add(Balance[Row](2))
-      val mergeDependencyCounts = builder.add(Merge[DependencyCount](2))
+      val mergeDependencyCounts =
+        builder.add(Zip[DependencyCount, DependencyCount])
 
-      dispatchRow.out(0) ~> count.async ~> sum.async ~> mergeDependencyCounts
-        .in(0)
-      dispatchRow.out(1) ~> count.async ~> sum.async ~> mergeDependencyCounts
-        .in(1)
+      dispatchRow
+        .out(0) ~> count.async ~> sum.async ~> mergeDependencyCounts.in0
+      dispatchRow
+        .out(1) ~> count.async ~> sum.async ~> mergeDependencyCounts.in1
 
       FlowShape(dispatchRow.in, mergeDependencyCounts.out)
     })
@@ -68,6 +68,7 @@ object Main extends App with LazyLogging {
     .groupBy(Int.MaxValue, _.library)
     .via(counter)
     .mergeSubstreams
+    .map { case (a, b) => a add b }
     .map(_.show())
     .map(ByteString(_))
     .runWith(FileIO.toPath(outputPath))
@@ -118,18 +119,14 @@ object Model extends LazyLogging {
                              runtimeCount: Count = Count(Runtime, 0),
                              testCount: Count = Count(Test, 0)) {
 
-    def add(other: DependencyCount) = {
-      if (other.library.isEmpty || library.orElse(other.library).isEmpty) {
-        logger.error(s"adding empty library with $this")
-      }
+    def add(other: DependencyCount) =
       DependencyCount(
         library.orElse(other.library),
         Count(Compile, compileCount.count + other.compileCount.count),
         Count(Provided, providedCount.count + other.providedCount.count),
         Count(Runtime, runtimeCount.count + other.runtimeCount.count),
-        Count(Test, runtimeCount.count + other.runtimeCount.count)
+        Count(Test, testCount.count + other.testCount.count)
       )
-    }
 
     def show(): String =
       s"""${library.map(_.show()).getOrElse("")} --> ${compileCount
